@@ -1,65 +1,133 @@
-import time
-import board
-import adafruit_dht
-import requests
 import os
+import time
+import adafruit_dht
+import board
+import requests
 from dotenv import load_dotenv
+from pmv_ppd_calculate import pmv_ppd_calc
 
-load_dotenv()
 
-THINGSPEAK_WRITE_API_KEY = os.getenv("THINGSPEAK_API_KEY")
 THINGSPEAK_URL = "https://api.thingspeak.com/update"
-
-if THINGSPEAK_WRITE_API_KEY is None:
-    print("BŁĄD KRYTYCZNY: Nie znaleziono 'THINGSPEAK_API_KEY' w pliku .env")
-    print("Upewnij się, że plik .env istnieje i zawiera poprawny klucz.")
-    exit()
-
 PIN_CZUJNIKA = board.D4
+INTERVAL_READ_SEC = 60.0
+SEND_OPTIONALS = False # Send PMV and PPD
 
-try:
-    dhtDevice = adafruit_dht.DHT22(PIN_CZUJNIKA)
-except Exception as e:
-    print(f"Nie można zainicjować czujnika na pinie {PIN_CZUJNIKA}: {e}")
-    print("Sprawdź podłączenie i czy skrypt ma uprawnienia.")
-    exit()
+# Klucz API
+THINGSPEAK_WRITE_API_KEY = None
 
-print("Rozpoczynanie odczytu z DHT22 i wysyłanie do ThingSpeak (CTRL+C aby zakończyć)")
-print("=" * 40)
 
-while True:
+def load_config():
+    global THINGSPEAK_WRITE_API_KEY
+    load_dotenv()
+
+    THINGSPEAK_WRITE_API_KEY = os.getenv("THINGSPEAK_API_KEY")
+
+    if not THINGSPEAK_WRITE_API_KEY:
+        print("Nie znaleziono albo niepoprawny klucz API ThingSpeak w pliku .env")
+        return False
+
+    print("Klucz API poprawny!")
+    return True
+
+
+def dht_init(pin):
     try:
-        temperatura_c = dhtDevice.temperature
-        wilgotnosc = dhtDevice.humidity
+        dhtDevice = adafruit_dht.DHT22(pin)
+        print(f"Poprawnie zainicjowano czujnik DHT22 na pinie {pin}")
+        return dhtDevice
+    except Exception as err:
+        print(f"Nie można zainicjować czujnika na pinie {pin}: {err}")
+        return None
 
-        if wilgotnosc is not None and temperatura_c is not None:
-            print(f"Odczyt: Temperatura: {temperatura_c:.1f}°C | Wilgotność: {wilgotnosc:.1f}%")
 
-            try:
-                payload = {
-                    'api_key': THINGSPEAK_WRITE_API_KEY,
-                    'field1': temperatura_c,
-                    'field2': wilgotnosc
-                }
+def read_data_from_dht(dht):
+    try:
+        temperature = dht.temperature
+        humidity = dht.humidity
 
-                response = requests.post(THINGSPEAK_URL, data=payload)
+        if humidity is None or temperature is None:
+            print("Odczyt z DHT nie powiódł się. Próbuję ponownie...")
+            return None, None
 
-                if response.status_code == 200:
-                    print(f"Wysłano do ThingSpeak (ID wpisu: {response.text})")
-                else:
-                    print(f"Błąd ThingSpeak. Status: {response.status_code}, Treść: {response.text}")
+        print(f"Temperatura: {temperature:.1f}°C  |  Wilgotność: {humidity:.1f}%")
 
-            except requests.exceptions.RequestException as e:
-                print(f"Błąd połączenia z ThingSpeak: {e}")
-
-        else:
-            print("Odczyt z DHT nie powiódł się (zwrócono None). Próbuję ponownie...")
-
+        return temperature, humidity
     except RuntimeError as error:
         print(f"Błąd odczytu DHT: {error.args[0]}. Próbuję ponownie...")
-    except Exception as error:
-        dhtDevice.exit()
-        raise error
+        return None, None
+    except Exception as e:
+        print(f"Nieoczekiwany błąd podczas odczytu czujnika: {e}")
+        return None, None
 
-    print("--- Czekam 10 sekund na kolejny odczyt i wysłanie ---")
-    time.sleep(10.0)
+
+def send_to_thingspeak(temperature, humidity, pmv, ppd, send_optionals=False):
+    payload = {}
+
+    if not send_optionals:
+        payload = {
+            'api_key': THINGSPEAK_WRITE_API_KEY,
+            'field1': temperature,
+            'field2': humidity,
+        }
+    else:
+        payload = {
+            'api_key': THINGSPEAK_WRITE_API_KEY,
+            'field1': temperature,
+            'field2': humidity,
+            'field3': pmv,
+            'field4': ppd
+        }
+
+    try:
+        response = requests.post(THINGSPEAK_URL, data=payload)
+
+        if response.status_code == 200:
+            print(f"Poprawnie wysłano do ThingSpeak (ID wpisu: {response.text.strip()})")
+        else:
+            print(f"Błąd ThingSpeak. Status: {response.status_code}, Treść: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Błąd połączenia z ThingSpeak: {e}")
+
+
+def main():
+    if not load_config():
+        return
+
+    dht_device = dht_init(PIN_CZUJNIKA)
+    if not dht_device:
+        return
+
+    print("Rozpoczynanie odczytu z DHT22 i wysyłanie do ThingSpeak (CTRL+C aby zakończyć)")
+    print("=" * 40)
+
+    try:
+        while True:
+
+            # Odczyt danych z DHT
+            temperature, humidity = read_data_from_dht(dht_device)
+
+            if temperature is None and humidity is None:
+                continue
+
+            # Obliczanie wskaźników
+            pmv, ppd = pmv_ppd_calc(temperature, humidity) if SEND_OPTIONALS else (None, None)
+
+            # Wysyłanie danych do Thingspeak
+            send_to_thingspeak(temperature, humidity, pmv, ppd, SEND_OPTIONALS)
+
+            print(f"--- Czekam {INTERVAL_READ_SEC}s ---")
+            print("=" * 40)
+            time.sleep(INTERVAL_READ_SEC)
+
+    except KeyboardInterrupt:
+        print("\nPrzerwano przez użytkownika (CTRL+C)")
+    except Exception as e:
+        print(f"Wystąpił nieoczekiwany błąd: {e}")
+    finally:
+        if dht_device:
+            dht_device.exit()
+        print("Program zakończony")
+
+
+if __name__ == "__main__":
+    main()
