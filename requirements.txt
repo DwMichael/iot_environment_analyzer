@@ -1,0 +1,5 @@
+requests~=2.32.5
+adafruit-circuitpython-dht
+python-dotenv~=1.2.1
+pythermalcomfort~=3.7.1
+dotenv~=0.9.9
